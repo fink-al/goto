@@ -2,8 +2,10 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -172,12 +174,46 @@ func (m *mainModel) updateViewPort(w, h int) tea.Model {
 	return m
 }
 
+// from: https://github.com/go-enry/go-enry/blob/master/utils.go#L12
+const binSniffLen = 8000
+
+// IsBinary detects if data is a binary value based on:
+// http://git.kernel.org/cgit/git/git.git/tree/xdiff-interface.c?id=HEAD#n198
+func IsBinary(data []byte) bool {
+	if len(data) > binSniffLen {
+		data = data[:binSniffLen]
+	}
+
+	if bytes.IndexByte(data, byte(0)) == -1 {
+		return false
+	}
+
+	return true
+}
+
 func (m *mainModel) dispatchProcess(
 	processType constant.ProcessType,
 	process *exec.Cmd,
 	inBackground,
 	ignoreError bool,
 ) tea.Cmd {
+	if len(process.Args) > 2 {
+		// delete first element which is a command name
+		// check if process.Args[0] is binary or script
+		// if it's a script we have to run it with /bin/sh
+		// if it's a binary we have to run it directly
+		pathOfBin, err1 := exec.LookPath(process.Args[0])
+		// may be a script in path. check if file pathOfBin has binary content
+		if _, err := os.ReadFile(pathOfBin); err1 == nil && err == nil { // TODO fix  && !IsBinary(data) {
+			process.Args[0] = "/bin/sh"
+			process = exec.Command(process.Args[0], process.Args[1:]...)
+		} else {
+			// remove fist element which is wrong ssh
+			process.Args = process.Args[1:]
+			process = exec.Command(process.Args[0], process.Args[1:]...)
+		}
+
+	}
 	onProcessExitCallback := func(err error) tea.Msg {
 		// We can only read StdOut or StdErr of a process which was built using `BuildProcessInterceptStdAll()`
 		// function because it preserves process output in a temporary buffer.
@@ -206,7 +242,7 @@ func (m *mainModel) dispatchProcess(
 			m.logger.Error("[EXEC] Terminate process with reason %v", readableStdErr)
 			commandWhichFailed := strings.Join(process.Args, " ")
 			// errorDetails contains command which was executed and the error text.
-			errorDetails := fmt.Sprintf("Command: %s\nError:   %s", commandWhichFailed, readableStdErr)
+			errorDetails := fmt.Sprintf("Command: %s\nError:   %s %#+v", commandWhichFailed, readableStdErr, process)
 			return message.RunProcessErrorOccurred{
 				ProcessType: processType,
 				StdOut:      processOutput,
